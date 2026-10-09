@@ -214,8 +214,165 @@ function getNextId(arr) {
 }
 
 async function getDatabase() {
+  return {
+    get: async (sql, params) => {
+      // Login
+      if (sql.includes('SELECT u.id, u.username, u.password_hash, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.username = ?')) {
+        const user = data.users.find(u => u.username === params[0]);
+        if (!user) return null;
+        const role = data.roles.find(r => r.id === user.role_id);
+        return { ...user, role: role?.name };
+      }
+      // Get user by ID
+      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+        const user = data.users.find(u => u.id === params[0]);
+        if (!user) return null;
+        const role = data.roles.find(r => r.id === user.role_id);
+        return { ...user, role: role?.name };
+      }
+      // Services
+      if (sql.includes('SELECT * FROM services WHERE id = ? AND active = 1')) {
+        return data.services.find(s => s.id === params[0] && s.active === 1) || null;
+      }
+      if (sql.includes('SELECT * FROM services WHERE active = 1')) {
+        return data.services.filter(s => s.active === 1);
+      }
+      // Windows
+      if (sql.includes('SELECT * FROM windows WHERE id = ? AND active = 1')) {
+        return data.windows.find(w => w.id === params[0] && w.active === 1) || null;
+      }
+      if (sql.includes('SELECT * FROM windows WHERE active = 1')) {
+        return data.windows.filter(w => w.active === 1);
+      }
+      // Operator sessions
+      if (sql.includes('SELECT * FROM operator_sessions WHERE window_id = ? AND ended_at IS NULL')) {
+        return data.operator_sessions.find(s => s.window_id === params[0] && !s.ended_at) || null;
+      }
+      if (sql.includes('SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL')) {
+        return data.operator_sessions.find(s => s.operator_id === params[0] && !s.ended_at) || null;
+      }
+      // Tickets
+      if (sql.includes('SELECT * FROM tickets WHERE token = ?')) {
+        return data.tickets.find(t => t.token === params[0]) || null;
+      }
+      if (sql.includes('SELECT * FROM tickets WHERE service_id = ? AND status = ? ORDER BY created_at LIMIT 1')) {
+        const tickets = data.tickets
+          .filter(t => t.service_id === params[0] && t.status === params[1])
+          .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        return tickets[0] || null;
+      }
+      // Ticket details with joins
+      if (sql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t')) {
+        return data.tickets.map(t => {
+          const service = data.services.find(s => s.id === t.service_id);
+          const operator = t.operator_id ? data.users.find(u => u.id === t.operator_id) : null;
+          const session = t.operator_id ? data.operator_sessions.find(s => s.operator_id === t.operator_id && !s.ended_at) : null;
+          const window = session ? data.windows.find(w => w.id === session.window_id) : null;
+          return {
+            ...t,
+            service_name: service?.name,
+            service_prefix: service?.prefix,
+            operator_username: operator?.username,
+            window_number: window?.number
+          };
+        });
+      }
+      // User by ID for /auth/me
+      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+        const user = data.users.find(u => u.id === params[0]);
+        if (!user) return null;
+        const role = data.roles.find(r => r.id === user.role_id);
+        return { ...user, role: role?.name };
+      }
+      return null;
+    },
+    all: async (sql, params) => {
+      if (sql.includes('SELECT * FROM services WHERE active = 1')) {
+        return data.services.filter(s => s.active === 1);
+      }
+      if (sql.includes('SELECT * FROM windows WHERE active = 1')) {
+        return data.windows.filter(w => w.active === 1);
+      }
+      if (sql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t')) {
+        return data.tickets.map(t => {
+          const service = data.services.find(s => s.id === t.service_id);
+          const operator = t.operator_id ? data.users.find(u => u.id === t.operator_id) : null;
+          const session = t.operator_id ? data.operator_sessions.find(s => s.operator_id === t.operator_id && !s.ended_at) : null;
+          const window = session ? data.windows.find(w => w.id === session.window_id) : null;
+          return {
+            ...t,
+            service_name: service?.name,
+            service_prefix: service?.prefix,
+            operator_username: operator?.username,
+            window_number: window?.number
+          };
+        });
+      }
+      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+        const user = data.users.find(u => u.id === params[0]);
+        if (!user) return [];
+        const role = data.roles.find(r => r.id === user.role_id);
+        return [{ ...user, role: role?.name }];
+      }
+      return [];
+    },
+    run: async (sql, params) => {
+      if (sql.includes('INSERT INTO tickets')) {
+        const [ticketNumber, serviceId, token] = params;
+        const newTicket = {
+          id: getNextId(data.tickets),
+          ticket_number: ticketNumber,
+          service_id: serviceId,
+          token,
+          status: 'waiting',
+          operator_id: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        data.tickets.push(newTicket);
+        return { lastID: newTicket.id, changes: 1 };
+      }
+      if (sql.includes('INSERT INTO operator_sessions')) {
+        const [operatorId, windowId, serviceId] = params;
+        const newSession = {
+          id: getNextId(data.operator_sessions),
+          operator_id: operatorId,
+          window_id: windowId,
+          service_id: serviceId,
+          started_at: new Date().toISOString(),
+          ended_at: null
+        };
+        data.operator_sessions.push(newSession);
+        return { lastID: newSession.id, changes: 1 };
+      }
+      if (sql.includes('INSERT INTO ticket_sequences')) {
+        return { lastID: 1, changes: 1 };
+      }
+      return { lastID: 1, changes: 1 };
+    },
+    exec: async (sql) => {
+      // No-op for PRAGMAs
+      return;
+    },
+    close: async () => {
+      return;
+    }
+  };
+}
+
+function getNextId(arr) {
+  return arr.length > 0 ? Math.max(...arr.map(x => x.id)) + 1 : 1;
+}
+
+async function initDatabase() {
+  console.log('Base de datos en memoria inicializada');
   return await getDatabase();
 }
+
+export default {
+  getDatabase,
+  initDatabase
+};
 
 async function initDatabase() {
   console.log('Base de datos en memoria inicializada');
