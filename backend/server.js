@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import Database from 'better-sqlite3';
+import { Database } from './database.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID, randomBytes } from 'crypto';
 
@@ -21,9 +21,9 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const db = new Database('turnos.db');
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = Database;
+Database.exec('PRAGMA journal_mode = WAL');
+Database.exec('PRAGMA foreign_keys = ON');
 
 const clients = new Map();
 

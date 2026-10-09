@@ -1,11 +1,6 @@
-import Database from 'better-sqlite3';
-import bcrypt from 'bcryptjs';
-import { randomUUID } from 'crypto';
+import Database from './database.js';
 
-const db = new Database('turnos.db');
-
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = Database;
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS roles (
@@ -70,6 +65,7 @@ insertRole.run('admin');
 insertRole.run('operador');
 
 const adminRole = db.prepare('SELECT id FROM roles WHERE name = ?').get('admin');
+import bcrypt from 'bcryptjs';
 const hashedPassword = bcrypt.hashSync('admin123', 10);
 
 const insertUser = db.prepare(`
@@ -103,4 +99,4 @@ console.log('Servicios: Trámite 1 (TR1), Trámite 2 (TR2), Trámite 3 (TR3)');
 console.log('Ventanillas: 1, 2, 3');
 console.log('Usuario admin / admin123 creado');
 
-db.close();
+Database.close();
