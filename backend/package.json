@@ -5,7 +5,8 @@
   "main": "db.js",
   "scripts": {
     "init-db": "node db.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npm rebuild better-sqlite3"
   },
   "dependencies": {
     "express": "^4.19.2",
