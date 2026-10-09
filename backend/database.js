@@ -135,13 +135,14 @@ async function getDatabase() {
       return null;
     },
     all: async (sql, params) => {
-      if (sql.includes('SELECT * FROM services WHERE active = 1')) {
+      const normalizedSql = sql.replace(/\s+/g, ' ').trim();
+      if (normalizedSql.includes('SELECT * FROM services WHERE active = 1')) {
         return data.services.filter(s => s.active === 1);
       }
-      if (sql.includes('SELECT * FROM windows WHERE active = 1')) {
+      if (normalizedSql.includes('SELECT * FROM windows WHERE active = 1')) {
         return data.windows.filter(w => w.active === 1);
       }
-      if (sql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t JOIN services s ON t.service_id = s.id LEFT JOIN users u ON t.operator_id = u.id LEFT JOIN operator_sessions os ON os.operator_id = t.operator_id AND os.ended_at IS NULL LEFT JOIN windows w ON os.window_id = w.id WHERE 1=1')) {
+      if (normalizedSql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t JOIN services s ON t.service_id = s.id LEFT JOIN users u ON t.operator_id = u.id LEFT JOIN operator_sessions os ON os.operator_id = t.operator_id AND os.ended_at IS NULL LEFT JOIN windows w ON os.window_id = w.id WHERE 1=1')) {
         return data.tickets.map(t => {
           const service = data.services.find(s => s.id === t.service_id);
           const operator = t.operator_id ? data.users.find(u => u.id === t.operator_id) : null;
@@ -156,7 +157,7 @@ async function getDatabase() {
           };
         });
       }
-      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+      if (normalizedSql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
         const user = data.users.find(u => u.id === params[0]);
         if (!user) return [];
         const role = data.roles.find(r => r.id === user.role_id);
@@ -214,55 +215,56 @@ function getNextId(arr) {
 }
 
 async function getDatabase() {
-  return {
-    get: async (sql, params) => {
+      // Normalize SQL for matching
+      const normalizedSql = sql.replace(/\s+/g, ' ').trim();
+      
       // Login
-      if (sql.includes('SELECT u.id, u.username, u.password_hash, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.username = ?')) {
+      if (normalizedSql.includes('SELECT u.id, u.username, u.password_hash, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.username = ?')) {
         const user = data.users.find(u => u.username === params[0]);
         if (!user) return null;
         const role = data.roles.find(r => r.id === user.role_id);
         return { ...user, role: role?.name };
       }
       // Get user by ID
-      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+      if (normalizedSql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
         const user = data.users.find(u => u.id === params[0]);
         if (!user) return null;
         const role = data.roles.find(r => r.id === user.role_id);
         return { ...user, role: role?.name };
       }
       // Services
-      if (sql.includes('SELECT * FROM services WHERE id = ? AND active = 1')) {
+      if (normalizedSql.includes('SELECT * FROM services WHERE id = ? AND active = 1')) {
         return data.services.find(s => s.id === params[0] && s.active === 1) || null;
       }
-      if (sql.includes('SELECT * FROM services WHERE active = 1')) {
+      if (normalizedSql.includes('SELECT * FROM services WHERE active = 1')) {
         return data.services.filter(s => s.active === 1);
       }
       // Windows
-      if (sql.includes('SELECT * FROM windows WHERE id = ? AND active = 1')) {
+      if (normalizedSql.includes('SELECT * FROM windows WHERE id = ? AND active = 1')) {
         return data.windows.find(w => w.id === params[0] && w.active === 1) || null;
       }
-      if (sql.includes('SELECT * FROM windows WHERE active = 1')) {
+      if (normalizedSql.includes('SELECT * FROM windows WHERE active = 1')) {
         return data.windows.filter(w => w.active === 1);
       }
       // Operator sessions
-      if (sql.includes('SELECT * FROM operator_sessions WHERE window_id = ? AND ended_at IS NULL')) {
+      if (normalizedSql.includes('SELECT * FROM operator_sessions WHERE window_id = ? AND ended_at IS NULL')) {
         return data.operator_sessions.find(s => s.window_id === params[0] && !s.ended_at) || null;
       }
-      if (sql.includes('SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL')) {
+      if (normalizedSql.includes('SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL')) {
         return data.operator_sessions.find(s => s.operator_id === params[0] && !s.ended_at) || null;
       }
       // Tickets
-      if (sql.includes('SELECT * FROM tickets WHERE token = ?')) {
+      if (normalizedSql.includes('SELECT * FROM tickets WHERE token = ?')) {
         return data.tickets.find(t => t.token === params[0]) || null;
       }
-      if (sql.includes('SELECT * FROM tickets WHERE service_id = ? AND status = ? ORDER BY created_at LIMIT 1')) {
+      if (normalizedSql.includes('SELECT * FROM tickets WHERE service_id = ? AND status = ? ORDER BY created_at LIMIT 1')) {
         const tickets = data.tickets
           .filter(t => t.service_id === params[0] && t.status === params[1])
           .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
         return tickets[0] || null;
       }
       // Ticket details with joins
-      if (sql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t')) {
+      if (normalizedSql.includes('SELECT t.*, s.name as service_name, s.prefix as service_prefix, u.username as operator_username, w.number as window_number FROM tickets t')) {
         return data.tickets.map(t => {
           const service = data.services.find(s => s.id === t.service_id);
           const operator = t.operator_id ? data.users.find(u => u.id === t.operator_id) : null;
@@ -278,7 +280,7 @@ async function getDatabase() {
         });
       }
       // User by ID for /auth/me
-      if (sql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
+      if (normalizedSql.includes('SELECT u.id, u.username, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')) {
         const user = data.users.find(u => u.id === params[0]);
         if (!user) return null;
         const role = data.roles.find(r => r.id === user.role_id);
