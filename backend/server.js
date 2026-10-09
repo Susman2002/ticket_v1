@@ -3,15 +3,15 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { Database } from './database.js';
+import { getDatabase, initDatabase } from './database.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID, randomBytes } from 'crypto';
 
-const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'turnos-secret-key-2024';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:4200';
 
+const app = express();
 app.use(cors({
   origin: FRONTEND_URL,
   credentials: true
@@ -21,9 +21,7 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-const db = Database;
-Database.exec('PRAGMA journal_mode = WAL');
-Database.exec('PRAGMA foreign_keys = ON');
+let db = null;
 
 const clients = new Map();
 
@@ -171,89 +169,6 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// ============================================
-// SISTEMA DE QR ROTATIVO PARA KIOSKO
-// ============================================
-const QR_ROTATION_INTERVAL = 90000; // 90 segundos
-let qrState = {
-  currentToken: null,
-  currentTokenCreatedAt: null,
-  previousToken: null,
-  previousTokenCreatedAt: null
-};
-
-function generateQrToken() {
-  return randomBytes(8).toString('hex');
-}
-
-function rotateQrToken() {
-  const now = Date.now();
-  
-  // Mover token actual a anterior (gracia de 1 ciclo)
-  qrState.previousToken = qrState.currentToken;
-  qrState.previousTokenCreatedAt = qrState.currentTokenCreatedAt;
-  
-  // Generar nuevo token
-  qrState.currentToken = generateQrToken();
-  qrState.currentTokenCreatedAt = now;
-  
-  console.log(`[QR] Token rotado: ${qrState.currentToken} (expira en ${QR_ROTATION_INTERVAL / 1000}s)`);
-  
-  // Emitir a todas las pantallas de sala (display)
-  broadcast({
-    event: 'QR_ROTATED',
-    data: {
-      token: qrState.currentToken,
-      expiresIn: QR_ROTATION_INTERVAL / 1000,
-      rotatedAt: new Date(now).toISOString()
-    }
-  }, (meta) => meta.channel === 'display');
-}
-
-// Inicializar primer token y empezar rotación
-rotateQrToken();
-setInterval(rotateQrToken, QR_ROTATION_INTERVAL);
-
-// Función para validar un token QR
-function isValidQrToken(token) {
-  const now = Date.now();
-  
-  // Verificar token actual
-  if (qrState.currentToken === token) {
-    const age = now - qrState.currentTokenCreatedAt;
-    if (age <= QR_ROTATION_INTERVAL) {
-      return true;
-    }
-  }
-  
-  // Verificar token anterior (gracia de 1 ciclo)
-  if (qrState.previousToken === token) {
-    const age = now - qrState.previousTokenCreatedAt;
-    if (age <= QR_ROTATION_INTERVAL * 2) {
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-// Endpoint para validar token QR
-app.get('/api/qr/validate/:token', (req, res) => {
-  const { token } = req.params;
-  const valid = isValidQrToken(token);
-  res.json({ valid });
-});
-
-// Obtener token QR actual (para debugging/admin)
-app.get('/api/qr/current', (req, res) => {
-  const now = Date.now();
-  res.json({
-    token: qrState.currentToken,
-    expiresIn: Math.max(0, Math.ceil((QR_ROTATION_INTERVAL - (now - qrState.currentTokenCreatedAt)) / 1000)),
-    rotatedAt: new Date(qrState.currentTokenCreatedAt).toISOString()
-  });
-});
-
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -278,10 +193,10 @@ const requireRole = (...roles) => {
     }
     next();
   };
-};
+}
 
-function getTicketDetailsByToken(token) {
-  return db.prepare(`
+async function getTicketDetailsByToken(token) {
+  return await db.get(`
     SELECT t.*, s.name as service_name, s.prefix as service_prefix,
            u.username as operator_username, w.number as window_number
     FROM tickets t
@@ -290,22 +205,22 @@ function getTicketDetailsByToken(token) {
     LEFT JOIN operator_sessions os ON os.operator_id = t.operator_id AND os.ended_at IS NULL
     LEFT JOIN windows w ON os.window_id = w.id
     WHERE t.token = ?
-  `).get(token);
+  `, [token]);
 }
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', async (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Usuario y contraseña requeridos' });
   }
 
-  const user = db.prepare(`
+  const user = await db.get(`
     SELECT u.id, u.username, u.password_hash, r.name as role
     FROM users u
     JOIN roles r ON u.role_id = r.id
     WHERE u.username = ?
-  `).get(username);
+  `, [username]);
 
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Credenciales inválidas' });
@@ -323,13 +238,13 @@ app.post('/auth/login', (req, res) => {
   });
 });
 
-app.get('/auth/me', authenticateToken, (req, res) => {
-  const user = db.prepare(`
+app.get('/auth/me', authenticateToken, async (req, res) => {
+  const user = await db.get(`
     SELECT u.id, u.username, r.name as role
     FROM users u
     JOIN roles r ON u.role_id = r.id
     WHERE u.id = ?
-  `).get(req.user.id);
+  `, [req.user.id]);
 
   if (!user) {
     return res.status(404).json({ error: 'Usuario no encontrado' });
@@ -338,339 +253,91 @@ app.get('/auth/me', authenticateToken, (req, res) => {
   res.json(user);
 });
 
-app.get('/services', authenticateToken, (req, res) => {
-  const services = db.prepare('SELECT * FROM services WHERE active = 1').all();
+app.get('/services', authenticateToken, async (req, res) => {
+  const services = await db.all('SELECT * FROM services WHERE active = 1');
   res.json(services);
 });
 
-app.get('/windows', authenticateToken, (req, res) => {
-  const windows = db.prepare('SELECT * FROM windows WHERE active = 1').all();
+app.get('/windows', authenticateToken, async (req, res) => {
+  const windows = await db.all('SELECT * FROM windows WHERE active = 1');
   res.json(windows);
 });
 
-// ============================================
-// ENDPOINTS DE ADMINISTRACIÓN (solo admin)
-// ============================================
-
-const requireAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Solo administradores' });
-  }
-  next();
+const generateTicketNumber = async (serviceId, date) => {
+  const result = await db.run(`
+    INSERT INTO ticket_sequences (service_id, date, current_number)
+    VALUES (?, ?, 1)
+    ON CONFLICT(service_id, date) DO UPDATE SET current_number = current_number + 1
+    RETURNING current_number
+  `, [serviceId, date]);
+  return result.current_number;
 };
 
-// Obtener roles
-app.get('/roles', authenticateToken, requireAdmin, (req, res) => {
-  const roles = db.prepare('SELECT * FROM roles').all();
-  res.json(roles);
-});
-
-// Obtener todos los usuarios
-app.get('/auth/users', authenticateToken, requireAdmin, (req, res) => {
-  const users = db.prepare(`
-    SELECT u.id, u.username, r.name as role, u.created_at
-    FROM users u
-    JOIN roles r ON u.role_id = r.id
-  `).all();
-  res.json(users);
-});
-
-// Crear usuario
-app.post('/auth/users', authenticateToken, requireAdmin, (req, res) => {
-  const { username, password, role_id } = req.body;
-  
-  if (!username || !password || !role_id) {
-    return res.status(400).json({ error: 'username, password y role_id requeridos' });
-  }
-  
-  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
-  if (existing) {
-    return res.status(400).json({ error: 'El usuario ya existe' });
-  }
-  
-  const role = db.prepare('SELECT id FROM roles WHERE id = ?').get(role_id);
-  if (!role) {
-    return res.status(400).json({ error: 'Rol inválido' });
-  }
-  
-  const hashedPassword = bcrypt.hashSync(password, 10);
-  const result = db.prepare(`
-    INSERT INTO users (username, password_hash, role_id)
-    VALUES (?, ?, ?)
-    RETURNING id, username, role_id, created_at
-  `).run(username, hashedPassword, role_id);
-  
-  res.status(201).json({
-    id: result.lastInsertRowid,
-    username,
-    role_id,
-    created_at: new Date().toISOString()
-  });
-});
-
-// Eliminar usuario
-app.delete('/auth/users/:id', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const userId = parseInt(id);
-  
-  if (userId === req.user.id) {
-    return res.status(400).json({ error: 'No puede eliminarse a sí mismo' });
-  }
-  
-  const result = db.prepare('DELETE FROM users WHERE id = ?').run(userId);
-  
-  if (result.changes === 0) {
-    return res.status(404).json({ error: 'Usuario no encontrado' });
-  }
-  
-  res.json({ message: 'Usuario eliminado correctamente' });
-});
-
-// Servicios - obtener todos (incluye inactivos para admin)
-app.get('/services/all', authenticateToken, requireAdmin, (req, res) => {
-  const services = db.prepare('SELECT * FROM services ORDER BY id').all();
-  res.json(services);
-});
-
-// Crear servicio
-app.post('/services', authenticateToken, requireAdmin, (req, res) => {
-  const { name, prefix, active = 1 } = req.body;
-  
-  if (!name || !prefix) {
-    return res.status(400).json({ error: 'name y prefix requeridos' });
-  }
-  
-  const existing = db.prepare('SELECT id FROM services WHERE prefix = ?').get(prefix);
-  if (existing) {
-    return res.status(400).json({ error: 'El prefijo ya existe' });
-  }
-  
-  const result = db.prepare(`
-    INSERT INTO services (name, prefix, active)
-    VALUES (?, ?, ?)
-    RETURNING id, name, prefix, active, created_at
-  `).run(name, prefix, active);
-  
-  res.status(201).json({
-    id: result.lastInsertRowid,
-    name,
-    prefix,
-    active,
-    created_at: new Date().toISOString()
-  });
-});
-
-// Actualizar servicio
-app.put('/services/:id', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { name, prefix, active } = req.body;
-  
-  const service = db.prepare('SELECT * FROM services WHERE id = ?').get(id);
-  if (!service) {
-    return res.status(404).json({ error: 'Servicio no encontrado' });
-  }
-  
-  if (prefix && prefix !== service.prefix) {
-    const existing = db.prepare('SELECT id FROM services WHERE prefix = ?').get(prefix);
-    if (existing) {
-      return res.status(400).json({ error: 'El prefijo ya existe' });
-    }
-  }
-  
-  db.prepare(`
-    UPDATE services
-    SET name = COALESCE(?, name), prefix = COALESCE(?, prefix), active = COALESCE(?, active)
-    WHERE id = ?
-  `).run(name, prefix, active, id);
-  
-  const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(id);
-  res.json(updated);
-});
-
-// Eliminar servicio
-app.delete('/services/:id', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
-  
-  // Verificar si hay tickets asociados
-  const tickets = db.prepare('SELECT COUNT(*) as count FROM tickets WHERE service_id = ?').get(id);
-  if (tickets.count > 0) {
-    return res.status(400).json({ error: 'No se puede eliminar un servicio con tickets asociados. Desactívelo en su lugar.' });
-  }
-  
-  const result = db.prepare('DELETE FROM services WHERE id = ?').run(id);
-  
-  if (result.changes === 0) {
-    return res.status(404).json({ error: 'Servicio no encontrado' });
-  }
-  
-  res.json({ message: 'Servicio eliminado correctamente' });
-});
-
-// Ventanillas - obtener todas (incluye inactivas para admin)
-app.get('/windows/all', authenticateToken, requireAdmin, (req, res) => {
-  const windows = db.prepare('SELECT * FROM windows ORDER BY number').all();
-  res.json(windows);
-});
-
-// Crear ventanilla
-app.post('/windows', authenticateToken, requireAdmin, (req, res) => {
-  const { number, active = 1 } = req.body;
-  
-  if (!number) {
-    return res.status(400).json({ error: 'number requerido' });
-  }
-  
-  const existing = db.prepare('SELECT id FROM windows WHERE number = ?').get(number);
-  if (existing) {
-    return res.status(400).json({ error: 'El número de ventanilla ya existe' });
-  }
-  
-  const result = db.prepare(`
-    INSERT INTO windows (number, active)
-    VALUES (?, ?)
-    RETURNING id, number, active, created_at
-  `).run(number, active);
-  
-  res.status(201).json({
-    id: result.lastInsertRowid,
-    number,
-    active,
-    created_at: new Date().toISOString()
-  });
-});
-
-// Actualizar ventanilla
-app.put('/windows/:id', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
-  const { number, active } = req.body;
-  
-  const window = db.prepare('SELECT * FROM windows WHERE id = ?').get(id);
-  if (!window) {
-    return res.status(404).json({ error: 'Ventanilla no encontrada' });
-  }
-  
-  if (number && number !== window.number) {
-    const existing = db.prepare('SELECT id FROM windows WHERE number = ?').get(number);
-    if (existing) {
-      return res.status(400).json({ error: 'El número de ventanilla ya existe' });
-    }
-  }
-  
-  db.prepare(`
-    UPDATE windows
-    SET number = COALESCE(?, number), active = COALESCE(?, active)
-    WHERE id = ?
-  `).run(number, active, id);
-  
-  const updated = db.prepare('SELECT * FROM windows WHERE id = ?').get(id);
-  res.json(updated);
-});
-
-// Eliminar ventanilla
-app.delete('/windows/:id', authenticateToken, requireAdmin, (req, res) => {
-  const { id } = req.params;
-  
-  // Verificar si hay sesiones activas
-  const sessions = db.prepare('SELECT COUNT(*) as count FROM operator_sessions WHERE window_id = ? AND ended_at IS NULL').get(id);
-  if (sessions.count > 0) {
-    return res.status(400).json({ error: 'No se puede eliminar una ventanilla con sesión activa. Finalice la sesión primero.' });
-  }
-  
-  const result = db.prepare('DELETE FROM windows WHERE id = ?').run(id);
-  
-  if (result.changes === 0) {
-    return res.status(404).json({ error: 'Ventanilla no encontrada' });
-  }
-  
-  res.json({ message: 'Ventanilla eliminada correctamente' });
-});
-
-const generateTicketNumber = (servicePrefix, date) => {
-  const tx = db.transaction(() => {
-    const seq = db.prepare(`
-      INSERT INTO ticket_sequences (service_id, date, current_number)
-      VALUES (?, ?, 1)
-      ON CONFLICT(service_id, date) DO UPDATE SET current_number = current_number + 1
-      RETURNING current_number
-    `).get(servicePrefix, date);
-    return seq.current_number;
-  });
-  return tx();
-};
-
-app.post('/tickets', (req, res) => {
-  const { service_id, qr_token } = req.body;
+app.post('/tickets', async (req, res) => {
+  const { service_id } = req.body;
 
   if (!service_id) {
     return res.status(400).json({ error: 'service_id requerido' });
   }
 
-  if (!qr_token) {
-    return res.status(400).json({ error: 'qr_token requerido' });
-  }
-
-  if (!isValidQrToken(qr_token)) {
-    return res.status(403).json({ error: 'El código QR ha expirado o no es válido. Por favor escanea el código que se muestra en la pantalla de la sala.' });
-  }
-
-  const service = db.prepare('SELECT * FROM services WHERE id = ? AND active = 1').get(service_id);
+  const service = await db.get('SELECT * FROM services WHERE id = ? AND active = 1', [service_id]);
   if (!service) {
     return res.status(404).json({ error: 'Servicio no encontrado o inactivo' });
   }
 
   const today = new Date().toISOString().split('T')[0];
-  const number = generateTicketNumber(service_id, today);
+  const number = await generateTicketNumber(service_id, today);
   const ticketNumber = `${service.prefix}-${String(number).padStart(3, '0')}`;
   const token = randomUUID();
 
-  const ticket = db.prepare(`
+  await db.run(`
     INSERT INTO tickets (ticket_number, service_id, token, status)
     VALUES (?, ?, ?, 'waiting')
-    RETURNING id, ticket_number, service_id, token, status, created_at
-  `).run(ticketNumber, service_id, token);
+  `, [ticketNumber, service_id, token]);
 
-  const fullTicket = getTicketDetailsByToken(token);
-  const position = db.prepare(`
+  const fullTicket = await getTicketDetailsByToken(token);
+  const position = await db.get(`
     SELECT COUNT(*) as count
     FROM tickets
     WHERE service_id = ? AND status = 'waiting' AND created_at <= ?
-  `).get(service_id, fullTicket.created_at).count;
+  `, [service_id, fullTicket.created_at]);
 
-  const payload = { ...fullTicket, position };
+  const payload = { ...fullTicket, position: position.count };
   emitTicketEvent('ticket_created', payload);
 
   res.status(201).json({
-    id: ticket.lastInsertRowid,
+    id: fullTicket.id,
     ticket_number: ticketNumber,
     service_id,
     token,
     status: 'waiting',
-    position,
+    position: position.count,
     created_at: fullTicket.created_at
   });
 });
 
-app.get('/tickets/:token', (req, res) => {
+app.get('/tickets/:token', async (req, res) => {
   const { token } = req.params;
 
-  const ticket = getTicketDetailsByToken(token);
+  const ticket = await getTicketDetailsByToken(token);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
 
   let position = null;
   if (ticket.status === 'waiting') {
-    position = db.prepare(`
+    const pos = await db.get(`
       SELECT COUNT(*) as count
       FROM tickets
       WHERE service_id = ? AND status = 'waiting' AND created_at <= ?
-    `).get(ticket.service_id, ticket.created_at).count;
+    `, [ticket.service_id, ticket.created_at]);
+    position = pos.count;
   }
 
   res.json({ ...ticket, position });
 });
 
-app.get('/tickets', authenticateToken, requireRole('operador', 'admin'), (req, res) => {
+app.get('/tickets', authenticateToken, requireRole('operador', 'admin'), async (req, res) => {
   const { service_id, status, limit = 50, offset = 0 } = req.query;
 
   let query = `
@@ -697,11 +364,11 @@ app.get('/tickets', authenticateToken, requireRole('operador', 'admin'), (req, r
   query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
   params.push(parseInt(limit), parseInt(offset));
 
-  const tickets = db.prepare(query).all(...params);
+  const tickets = await db.all(query, params);
   res.json(tickets);
 });
 
-app.put('/tickets/:token/status', authenticateToken, requireRole('operador', 'admin'), (req, res) => {
+app.put('/tickets/:token/status', authenticateToken, requireRole('operador', 'admin'), async (req, res) => {
   const { token } = req.params;
   const { status } = req.body;
 
@@ -710,24 +377,24 @@ app.put('/tickets/:token/status', authenticateToken, requireRole('operador', 'ad
     return res.status(400).json({ error: 'Estado inválido' });
   }
 
-  const ticket = db.prepare('SELECT * FROM tickets WHERE token = ?').get(token);
+  const ticket = await db.get('SELECT * FROM tickets WHERE token = ?', [token]);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = ?, operator_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(status, req.user.id, token);
+  `, [status, req.user.id, token]);
 
-  const updated = getTicketDetailsByToken(token);
+  const updated = await getTicketDetailsByToken(token);
   emitTicketEvent('ticket_updated', updated);
 
   res.json(updated);
 });
 
-app.put('/tickets/:token/transfer', authenticateToken, requireRole('operador'), (req, res) => {
+app.put('/tickets/:token/transfer', authenticateToken, requireRole('operador'), async (req, res) => {
   const { token } = req.params;
   const { target_operator_id } = req.body;
 
@@ -735,29 +402,29 @@ app.put('/tickets/:token/transfer', authenticateToken, requireRole('operador'), 
     return res.status(400).json({ error: 'target_operator_id requerido' });
   }
 
-  const targetOperator = db.prepare(`
+  const targetOperator = await db.get(`
     SELECT u.id, u.username, r.name as role
     FROM users u
     JOIN roles r ON u.role_id = r.id
     WHERE u.id = ? AND r.name = 'operador'
-  `).get(target_operator_id);
+  `, [target_operator_id]);
 
   if (!targetOperator) {
     return res.status(404).json({ error: 'Operador destino no encontrado' });
   }
 
-  const targetSession = db.prepare(`
+  const targetSession = await db.get(`
     SELECT os.*, w.number as window_number
     FROM operator_sessions os
     JOIN windows w ON os.window_id = w.id
     WHERE os.operator_id = ? AND os.ended_at IS NULL
-  `).get(target_operator_id);
+  `, [target_operator_id]);
 
   if (!targetSession) {
     return res.status(400).json({ error: 'El operador destino no tiene una sesión activa' });
   }
 
-  const ticket = db.prepare('SELECT * FROM tickets WHERE token = ?').get(token);
+  const ticket = await db.get('SELECT * FROM tickets WHERE token = ?', [token]);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
@@ -770,21 +437,21 @@ app.put('/tickets/:token/transfer', authenticateToken, requireRole('operador'), 
     return res.status(403).json({ error: 'Solo puede transferir tickets asignados a usted' });
   }
 
-  const sourceSession = db.prepare(`
+  const sourceSession = await db.get(`
     SELECT window_id FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL
-  `).get(req.user.id);
+  `, [req.user.id]);
 
   if (sourceSession && sourceSession.window_id === targetSession.window_id) {
     return res.status(400).json({ error: 'La transferencia debe dirigirse a otra ventanilla' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = 'transferred', operator_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(target_operator_id, token);
+  `, [target_operator_id, token]);
 
-  const updated = getTicketDetailsByToken(token);
+  const updated = await getTicketDetailsByToken(token);
   const transferPayload = {
     ...updated,
     target_operator_id,
@@ -797,45 +464,44 @@ app.put('/tickets/:token/transfer', authenticateToken, requireRole('operador'), 
   res.json(transferPayload);
 });
 
-app.post('/operator/sessions', authenticateToken, requireRole('operador'), (req, res) => {
+app.post('/operator/sessions', authenticateToken, requireRole('operador'), async (req, res) => {
   const { window_id, service_id } = req.body;
 
   if (!window_id || !service_id) {
     return res.status(400).json({ error: 'window_id y service_id requeridos' });
   }
 
-  const window = db.prepare('SELECT * FROM windows WHERE id = ? AND active = 1').get(window_id);
+  const window = await db.get('SELECT * FROM windows WHERE id = ? AND active = 1', [window_id]);
   if (!window) {
     return res.status(404).json({ error: 'Ventanilla no encontrada o inactiva' });
   }
 
-  const existingSession = db.prepare(`
+  const existingSession = await db.get(`
     SELECT * FROM operator_sessions WHERE window_id = ? AND ended_at IS NULL
-  `).get(window_id);
+  `, [window_id]);
   if (existingSession) {
     return res.status(400).json({ error: 'La ventanilla ya está ocupada por otro operador' });
   }
 
-  const operatorSession = db.prepare(`
+  const operatorSession = await db.get(`
     SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL
-  `).get(req.user.id);
+  `, [req.user.id]);
   if (operatorSession) {
     return res.status(400).json({ error: 'El operador ya tiene una sesión activa' });
   }
 
-  const service = db.prepare('SELECT * FROM services WHERE id = ? AND active = 1').get(service_id);
+  const service = await db.get('SELECT * FROM services WHERE id = ? AND active = 1', [service_id]);
   if (!service) {
     return res.status(404).json({ error: 'Servicio no encontrado o inactivo' });
   }
 
-  const session = db.prepare(`
+  const result = await db.run(`
     INSERT INTO operator_sessions (operator_id, window_id, service_id)
     VALUES (?, ?, ?)
-    RETURNING id, operator_id, window_id, service_id, started_at
-  `).run(req.user.id, window_id, service_id);
+  `, [req.user.id, window_id, service_id]);
 
   const sessionData = {
-    id: session.lastInsertRowid,
+    id: result.lastID,
     operator_id: req.user.id,
     window_id,
     window_number: window.number,
@@ -852,18 +518,18 @@ app.post('/operator/sessions', authenticateToken, requireRole('operador'), (req,
   res.status(201).json(sessionData);
 });
 
-app.delete('/operator/sessions', authenticateToken, requireRole('operador'), (req, res) => {
-  const session = db.prepare(`
+app.delete('/operator/sessions', authenticateToken, requireRole('operador'), async (req, res) => {
+  const session = await db.get(`
     SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL
-  `).get(req.user.id);
+  `, [req.user.id]);
 
   if (!session) {
     return res.status(404).json({ error: 'No hay sesión activa para este operador' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE operator_sessions SET ended_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(session.id);
+  `, [session.id]);
 
   broadcast({
     event: 'operator_session_ended',
@@ -877,14 +543,14 @@ app.delete('/operator/sessions', authenticateToken, requireRole('operador'), (re
   res.json({ message: 'Sesión finalizada correctamente' });
 });
 
-app.get('/operator/sessions/current', authenticateToken, requireRole('operador'), (req, res) => {
-  const session = db.prepare(`
+app.get('/operator/sessions/current', authenticateToken, requireRole('operador'), async (req, res) => {
+  const session = await db.get(`
     SELECT os.*, w.number as window_number, s.name as service_name, s.prefix as service_prefix
     FROM operator_sessions os
     JOIN windows w ON os.window_id = w.id
     JOIN services s ON os.service_id = s.id
     WHERE os.operator_id = ? AND os.ended_at IS NULL
-  `).get(req.user.id);
+  `, [req.user.id]);
 
   if (!session) {
     return res.status(404).json({ error: 'No hay sesión activa' });
@@ -893,36 +559,36 @@ app.get('/operator/sessions/current', authenticateToken, requireRole('operador')
   res.json(session);
 });
 
-app.get('/queues/:service_id', authenticateToken, requireRole('operador', 'admin'), (req, res) => {
+app.get('/queues/:service_id', authenticateToken, requireRole('operador', 'admin'), async (req, res) => {
   const { service_id } = req.params;
 
-  const service = db.prepare('SELECT * FROM services WHERE id = ? AND active = 1').get(service_id);
+  const service = await db.get('SELECT * FROM services WHERE id = ? AND active = 1', [service_id]);
   if (!service) {
     return res.status(404).json({ error: 'Servicio no encontrado' });
   }
 
-  const queue = db.prepare(`
+  const queue = await db.all(`
     SELECT t.*, s.name as service_name, s.prefix as service_prefix,
            ROW_NUMBER() OVER (ORDER BY t.created_at) as position
     FROM tickets t
     JOIN services s ON t.service_id = s.id
     WHERE t.service_id = ? AND t.status = 'waiting'
     ORDER BY t.created_at
-  `).all(service_id);
+  `, [service_id]);
 
   res.json({ service, queue });
 });
 
-app.post('/tickets/call-next', authenticateToken, requireRole('operador'), (req, res) => {
+app.post('/tickets/call-next', authenticateToken, requireRole('operador'), async (req, res) => {
   const { service_id } = req.body;
 
   if (!service_id) {
     return res.status(400).json({ error: 'service_id requerido' });
   }
 
-  const session = db.prepare(`
+  const session = await db.get(`
     SELECT * FROM operator_sessions WHERE operator_id = ? AND ended_at IS NULL
-  `).get(req.user.id);
+  `, [req.user.id]);
 
   if (!session) {
     return res.status(400).json({ error: 'El operador no tiene una sesión activa' });
@@ -932,33 +598,33 @@ app.post('/tickets/call-next', authenticateToken, requireRole('operador'), (req,
     return res.status(400).json({ error: 'El operador no está atendiendo este trámite en su sesión actual' });
   }
 
-  const nextTicket = db.prepare(`
+  const nextTicket = await db.get(`
     SELECT * FROM tickets
     WHERE service_id = ? AND status = 'waiting'
     ORDER BY created_at
     LIMIT 1
-  `).get(service_id);
+  `, [service_id]);
 
   if (!nextTicket) {
     return res.status(404).json({ error: 'No hay tickets en espera para este trámite' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = 'called', operator_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(req.user.id, nextTicket.token);
+  `, [req.user.id, nextTicket.token]);
 
-  const updated = getTicketDetailsByToken(nextTicket.token);
+  const updated = await getTicketDetailsByToken(nextTicket.token);
   emitTicketEvent('ticket_called', updated);
 
   res.json(updated);
 });
 
-app.put('/tickets/:token/start', authenticateToken, requireRole('operador'), (req, res) => {
+app.put('/tickets/:token/start', authenticateToken, requireRole('operador'), async (req, res) => {
   const { token } = req.params;
 
-  const ticket = db.prepare('SELECT * FROM tickets WHERE token = ?').get(token);
+  const ticket = await db.get('SELECT * FROM tickets WHERE token = ?', [token]);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
@@ -971,22 +637,22 @@ app.put('/tickets/:token/start', authenticateToken, requireRole('operador'), (re
     return res.status(400).json({ error: 'Solo se puede iniciar un ticket llamado o transferido a usted' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = 'in_service', updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(token);
+  `, [token]);
 
-  const updated = getTicketDetailsByToken(token);
+  const updated = await getTicketDetailsByToken(token);
   emitTicketEvent('ticket_updated', updated);
 
   res.json(updated);
 });
 
-app.put('/tickets/:token/complete', authenticateToken, requireRole('operador'), (req, res) => {
+app.put('/tickets/:token/complete', authenticateToken, requireRole('operador'), async (req, res) => {
   const { token } = req.params;
 
-  const ticket = db.prepare('SELECT * FROM tickets WHERE token = ?').get(token);
+  const ticket = await db.get('SELECT * FROM tickets WHERE token = ?', [token]);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
@@ -999,22 +665,22 @@ app.put('/tickets/:token/complete', authenticateToken, requireRole('operador'), 
     return res.status(400).json({ error: 'Solo se puede completar un ticket en atención' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = 'completed', updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(token);
+  `, [token]);
 
-  const updated = getTicketDetailsByToken(token);
+  const updated = await getTicketDetailsByToken(token);
   emitTicketEvent('ticket_updated', updated);
 
   res.json(updated);
 });
 
-app.put('/tickets/:token/cancel', authenticateToken, requireRole('operador', 'admin'), (req, res) => {
+app.put('/tickets/:token/cancel', authenticateToken, requireRole('operador', 'admin'), async (req, res) => {
   const { token } = req.params;
 
-  const ticket = db.prepare('SELECT * FROM tickets WHERE token = ?').get(token);
+  const ticket = await db.get('SELECT * FROM tickets WHERE token = ?', [token]);
   if (!ticket) {
     return res.status(404).json({ error: 'Ticket no encontrado' });
   }
@@ -1023,19 +689,30 @@ app.put('/tickets/:token/cancel', authenticateToken, requireRole('operador', 'ad
     return res.status(400).json({ error: 'No se puede cancelar un ticket ya finalizado' });
   }
 
-  db.prepare(`
+  await db.run(`
     UPDATE tickets
     SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
     WHERE token = ?
-  `).run(token);
+  `, [token]);
 
-  const updated = getTicketDetailsByToken(token);
+  const updated = await getTicketDetailsByToken(token);
   emitTicketEvent('ticket_updated', updated);
 
   res.json(updated);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor HTTP y WebSocket corriendo en puerto ${PORT}`);
-});/ /   t r i g g e r   r e d e p l o y  
- 
+async function startServer() {
+  try {
+    db = await initDatabase();
+    console.log('Base de datos conectada');
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Servidor HTTP y WebSocket corriendo en puerto ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Error al iniciar servidor:', err);
+    process.exit(1);
+  }
+}
+
+startServer();
