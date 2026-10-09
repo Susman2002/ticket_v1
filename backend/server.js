@@ -208,33 +208,38 @@ async function getTicketDetailsByToken(token) {
 }
 
 app.post('/auth/login', async (req, res) => {
-  const { username, password } = req.body;
+  try {
+    const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Usuario y contraseña requeridos' });
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Usuario y contraseña requeridos' });
+    }
+
+    const user = await db.get(`
+      SELECT u.id, u.username, u.password_hash, r.name as role
+      FROM users u
+      JOIN roles r ON u.role_id = r.id
+      WHERE u.username = ?
+    `, [username]);
+
+    if (!user || password !== 'admin123') {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '8h' }
+    );
+
+    res.json({
+      token,
+      user: { id: user.id, username: user.username, role: user.role }
+    });
+  } catch (err) {
+    console.error('Error en login:', err);
+    return res.status(500).json({ error: 'Error interno del servidor', details: err.message });
   }
-
-  const user = await db.get(`
-    SELECT u.id, u.username, u.password_hash, r.name as role
-    FROM users u
-    JOIN roles r ON u.role_id = r.id
-    WHERE u.username = ?
-  `, [username]);
-
-  if (!user || password !== 'admin123') {
-    return res.status(401).json({ error: 'Credenciales inválidas' });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, username: user.username, role: user.role },
-    JWT_SECRET,
-    { expiresIn: '8h' }
-  );
-
-  res.json({
-    token,
-    user: { id: user.id, username: user.username, role: user.role }
-  });
 });
 
 app.get('/auth/me', authenticateToken, async (req, res) => {
