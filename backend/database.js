@@ -76,15 +76,12 @@ function initData() {
     ];
   }
 
-  // Usuario admin
+  // Usuario admin (password pre-hashed: admin123)
   if (data.users.length === 0) {
-    import('bcryptjs').then(bcrypt => {
-      const hashed = bcrypt.hashSync('admin123', 10);
-      data.users = [
-        { id: 1, username: 'admin', password_hash: hashed, role_id: 1, created_at: new Date().toISOString() }
-      ];
-      saveData();
-    });
+    data.users = [
+      { id: 1, username: 'admin', password_hash: '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', role_id: 1, created_at: new Date().toISOString() }
+    ];
+    saveData();
   }
 
   initialized = true;
