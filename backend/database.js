@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import initSqlJs from 'sql.js';
 
@@ -7,6 +7,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const DB_PATH = `${__dirname}/turnos.db`;
+// Ruta local al archivo WASM de sql.js
+const WASM_PATH = resolve(__dirname, 'node_modules/sql.js/dist/sql-wasm.wasm');
 
 let dbInstance = null;
 let isInitialized = false;
@@ -15,7 +17,7 @@ async function getDatabase() {
   if (dbInstance) return dbInstance;
 
   const SQL = await initSqlJs({
-    locateFile: (file) => `https://sql.js.org/dist/${file}`
+    locateFile: () => WASM_PATH
   });
 
   let db;
