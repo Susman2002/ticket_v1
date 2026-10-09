@@ -15,7 +15,7 @@ El sistema se compone de dos aplicaciones desacopladas comunicadas mediante HTTP
           │ HTTP (POST Ticket)          │ WebSocket (Sub Display)     │ HTTP + WebSocket
           ▼                             ▼                             ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                            Node.js HTTP & WS Server                         │
+│                            Node.js HTTP & WS Server                          │
 │                                 (Puerto 3000)                                │
 │                                                                              │
 │  ┌───────────────────────┐  ┌──────────────────────┐  ┌───────────────────┐  │
@@ -168,7 +168,7 @@ npm run start
 
 ---
 
-## 7. Credenciales Iniciales
+## 7. Credenciales In/iciales
 
 - **Administrador:**
   - Usuario: `admin`

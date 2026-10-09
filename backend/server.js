@@ -8,10 +8,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID, randomBytes } from 'crypto';
 
 const app = express();
-const PORT = 3000;
-const JWT_SECRET = 'turnos-secret-key-2024';
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'turnos-secret-key-2024';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:4200';
 
-app.use(cors());
+app.use(cors({
+  origin: FRONTEND_URL,
+  credentials: true
+}));
 app.use(express.json());
 
 const server = http.createServer(app);
@@ -1031,6 +1035,6 @@ app.put('/tickets/:token/cancel', authenticateToken, requireRole('operador', 'ad
   res.json(updated);
 });
 
-server.listen(PORT, () => {
-  console.log(`Servidor HTTP y WebSocket corriendo en http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor HTTP y WebSocket corriendo en puerto ${PORT}`);
 });

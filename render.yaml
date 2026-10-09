@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: turnos-backend
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: JWT_SECRET
+        generateValue: true
+      - key: FRONTEND_URL
+        value: https://turnos-frontend.vercel.app
+    healthCheckPath: /auth/me
+    autoDeploy: true
