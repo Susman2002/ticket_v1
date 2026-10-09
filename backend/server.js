@@ -1037,4 +1037,5 @@ app.put('/tickets/:token/cancel', authenticateToken, requireRole('operador', 'ad
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor HTTP y WebSocket corriendo en puerto ${PORT}`);
-});
+});/ /   t r i g g e r   r e d e p l o y  
+ 
